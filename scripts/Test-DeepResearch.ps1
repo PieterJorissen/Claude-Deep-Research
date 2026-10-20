@@ -12,10 +12,11 @@
       3. MCP handshake over stdio: initialize, tools/list, prompts/list
       4. DATABRICKS_BASE_URL / DATABRICKS_TOKEN
       5. A one-token request to the Databricks endpoint (skipped with -Quick)
-      6. opencode and its view of the configured MCP servers
+      6. Reachability of the two research hosts (skipped with -Quick)
+      7. opencode and its view of the configured MCP servers
 
 .PARAMETER Quick
-    Skip the checks that need network access (5 and 6).
+    Skip the checks that need network access (5, 6 and 7).
 
 .PARAMETER Model
     Serving endpoint to probe in check 5. Defaults to databricks-claude-opus-4-6.
@@ -219,7 +220,40 @@ else {
     }
 }
 
-# 6. opencode ---------------------------------------------------------------------------
+# 6. Research hosts ---------------------------------------------------------------------
+# The server talks HTTPS to these two hosts directly - no browser, no search CLI. On a
+# corporate network they are the usual thing to be blocked or TLS-inspected.
+$researchHosts = [ordered] @{
+    'html.duckduckgo.com'      = 'https://html.duckduckgo.com/html/?q=mcp+test'
+    'api.semanticscholar.org'  = 'https://api.semanticscholar.org/graph/v1/paper/search?query=test&limit=1'
+}
+foreach ($entry in $researchHosts.GetEnumerator()) {
+    if ($Quick) {
+        Write-Result skip "reach $($entry.Key)" '-Quick'
+        continue
+    }
+    try {
+        $probe = Invoke-WebRequest -Uri $entry.Value -TimeoutSec 45 -SkipHttpErrorCheck -MaximumRedirection 3
+        switch ([int] $probe.StatusCode) {
+            200 { Write-Result pass "reach $($entry.Key)" 'HTTP 200' }
+            429 { Write-Result warn "reach $($entry.Key)" '429 rate limited - reachable, but this address is being throttled right now' }
+            202 { Write-Result warn "reach $($entry.Key)" '202 - reachable, but a bot challenge was served instead of results' }
+            403 { Write-Result warn "reach $($entry.Key)" '403 - reachable, but the request was refused (proxy or bot filtering)' }
+            default { Write-Result warn "reach $($entry.Key)" "HTTP $($probe.StatusCode)" }
+        }
+    }
+    catch {
+        $message = $_.Exception.Message
+        $hint = if ($message -match 'trust|SSL|certificate|secure channel') {
+            'TLS inspection: this check trusts the Windows certificate store, the server trusts SSL_CERT_FILE - set it to your proxy CA bundle (see readme, Network)'
+        }
+        elseif ($env:HTTPS_PROXY -or $env:https_proxy) { 'HTTPS_PROXY is set - check its address' }
+        else { 'if your network needs a proxy, set HTTPS_PROXY (see readme, Network)' }
+        Write-Result fail "reach $($entry.Key)" "$message - $hint"
+    }
+}
+
+# 7. opencode ---------------------------------------------------------------------------
 $opencode = Get-Command opencode -ErrorAction SilentlyContinue
 if (-not $opencode) {
     Write-Result fail 'opencode on PATH' 'run ./scripts/Install-DeepResearch.ps1, or open a new shell if it was just installed'

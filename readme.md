@@ -30,6 +30,8 @@ one-command install on a locked-down Windows box.
 | PowerShell | 7.0 or later (developed against 7.6.7) |
 | Python | none installed by hand — `uv` manages it |
 | Databricks | a workspace with a Claude serving endpoint and a personal access token |
+| Network | HTTPS to `html.duckduckgo.com` and `api.semanticscholar.org` (see [Network](#network)) |
+| Browser, search CLI | not needed — the server makes its own HTTPS requests |
 | Admin rights | not needed |
 
 The installer fetches [uv](https://docs.astral.sh/uv/) (into `%USERPROFILE%\.local\bin`)
@@ -160,7 +162,43 @@ Set through the MCP server's `environment` block in `opencode.json`:
 |---|---|---|
 | `DEEP_RESEARCH_MAX_CONTENT` | `8000` (`16000` in `opencode.json`) | character budget for a tool response |
 | `DEEP_RESEARCH_MAX_RESULTS` | `3` | hard cap on `num_results` |
-| `DEEP_RESEARCH_USER_AGENT` | a desktop Chrome string | User-Agent for search and page fetches |
+| `DEEP_RESEARCH_USER_AGENT` | a desktop Chrome string | User-Agent header for search and page fetches |
+| `HTTPS_PROXY`, `NO_PROXY` | unset | standard proxy variables, honoured by the HTTP client |
+| `SSL_CERT_FILE` | bundled CA list | CA bundle to trust, for networks that inspect TLS |
+
+### Network
+
+The server needs no browser and no search CLI. It makes plain HTTPS requests from Python
+to exactly two hosts and parses the responses itself:
+
+| Host | Used for |
+|---|---|
+| `html.duckduckgo.com` | web search results |
+| `api.semanticscholar.org` | academic search results |
+
+plus whichever result URLs it follows to extract page content. Chrome, Edge, and a
+DuckDuckGo app are all irrelevant — `DEEP_RESEARCH_USER_AGENT` only sets a request
+*header*, so pages serve their desktop version rather than a mobile or bot one.
+
+On a corporate network, the two things that commonly need setting go in the MCP server's
+`environment` block in `opencode.json`:
+
+```json
+"environment": {
+  "HTTPS_PROXY": "http://proxy.corp.example:8080",
+  "NO_PROXY": "corp.example",
+  "SSL_CERT_FILE": "C:\\Users\\you\\certs\\corp-root-ca.pem"
+}
+```
+
+`SSL_CERT_FILE` is for proxies that re-sign TLS: Windows usually trusts the corporate root
+already, but Python ships its own CA list and does not read the Windows store. Export the
+root certificate (`certmgr.msc` → Trusted Root Certification Authorities, Base-64 X.509)
+and point the variable at it — no admin rights involved.
+
+`Test-DeepResearch.ps1` probes both hosts and tells you which case you are in: blocked,
+TLS-inspected, rate-limited (`429`), or served a bot challenge (`202`). The last two mean
+the network is fine and the search engine is throttling this address.
 
 ### Choosing a different model
 
@@ -201,6 +239,8 @@ and fall back to the default surface if it reports 401 or 403.
 | MCP handshake fails | Run `uv run deep_research.py` directly — the server logs to stderr. |
 | Scripts refuse to run | Per-user execution policy, no admin needed: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
 | Searches time out or return little | DuckDuckGo and Semantic Scholar both rate-limit. Narrow the query and retry. |
+| `reach html.duckduckgo.com` fails with an SSL error | A TLS-inspecting proxy. Set `SSL_CERT_FILE` to your corporate root certificate (see Network). |
+| `reach …` fails to connect at all | The host is blocked or needs a proxy. Set `HTTPS_PROXY` (see Network). |
 | PDF sources return no content | Expected: the server reports the URL and that the text could not be extracted rather than guessing. |
 
 ## Using it from another MCP client
