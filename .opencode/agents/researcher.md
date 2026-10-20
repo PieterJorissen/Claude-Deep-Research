@@ -1,7 +1,6 @@
 ---
 description: Multi-source research (web + academic) with APA citations and a written report
 mode: primary
-model: databricks/databricks-claude-opus-4-6
 temperature: 0.2
 ---
 

@@ -15,9 +15,16 @@ installer that run it against Claude Opus on Databricks Model Serving.
 - **stdout belongs to the MCP protocol.** The server must never `print()` to stdout.
   Diagnostics go to stderr through `logger`. This is why the old startup
   `pip install` was removed rather than redirected.
-- **No secrets in tracked files.** `opencode.json` reads `{env:DATABRICKS_BASE_URL}` and
-  `{env:DATABRICKS_TOKEN}`; the installer sets them. An unset variable substitutes to an
-  empty string, so failures look like auth errors — `Test-DeepResearch.ps1` checks for it.
+- **Model access is not ours.** The tracked `opencode.json` registers the MCP server and
+  nothing else: no `model`, no `small_model`, no `provider`. Project config outranks the
+  user's global config in opencode, so any of those entries here would silently override a
+  working setup. The researcher agent carries no `model` either — it inherits the session
+  model. `-ConfigureProvider` writes a provider to the *user's* config, never to a tracked
+  file, and asks before replacing one.
+- **No secrets in tracked files.** A provider written by `-ConfigureProvider` reads
+  `{env:DATABRICKS_TOKEN}`; the installer sets it. An unset variable substitutes to an
+  empty string, so failures look like auth errors — `Test-DeepResearch.ps1` checks for a
+  half-set pair.
 
 ## Checks
 

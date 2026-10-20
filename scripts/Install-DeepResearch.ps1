@@ -1,57 +1,73 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Installs the deep-research MCP server and the opencode CLI for the current user.
+    Installs the deep-research MCP server for the opencode CLI, for the current user.
 
 .DESCRIPTION
-    Everything this script installs lands under the user profile - no administrator
-    rights, no PATH changes outside HKCU, no system Python:
+    By default this sets up the research capability only and leaves model access alone:
+    opencode keeps whatever providers and models it already has, and the research agent
+    runs on the model you select in opencode.
+
+    Everything it installs lands under the user profile - no administrator rights, no
+    system Python, no system PATH changes:
 
       uv        -> %USERPROFILE%\.local\bin        (if missing)
       opencode  -> scoop / npm prefix / %LOCALAPPDATA%\Programs\opencode (if missing)
       .venv     -> <repo>\.venv                    (created by uv sync)
 
-    It then points opencode at Claude Opus on Databricks Model Serving by setting
-    DATABRICKS_BASE_URL and DATABRICKS_TOKEN, which opencode.json reads through
-    {env:...} substitution.
+    Use -ConfigureProvider only if opencode cannot reach Databricks models yet; it adds a
+    "databricks" provider to your own opencode config. Skip it when a Databricks provider
+    is already configured (for example by the Unity Gateway launcher) - this script will
+    not touch a working setup.
+
+.PARAMETER Global
+    Register the research server, the researcher agent, and the /deep-research command in
+    ~/.config/opencode so they work in every project, not just this repository.
+
+.PARAMETER ConfigureProvider
+    Add a Databricks provider to your opencode config. Needs -WorkspaceHost; prompts for a
+    personal access token if -Token and DATABRICKS_TOKEN are both absent.
 
 .PARAMETER WorkspaceHost
     Databricks workspace host, with or without the scheme, e.g.
-    adb-1234567890.12.azuredatabricks.net or https://dbc-abc123.cloud.databricks.com
+    adb-1234567890.12.azuredatabricks.net. Only used with -ConfigureProvider.
 
 .PARAMETER Token
-    Databricks personal access token. Prompted for (hidden) when omitted and
-    DATABRICKS_TOKEN is not already set.
+    Databricks personal access token. Only used with -ConfigureProvider.
 
 .PARAMETER Model
-    Databricks serving endpoint name. Defaults to databricks-claude-opus-4-6.
+    Serving endpoint to register with -ConfigureProvider. Defaults to
+    databricks-claude-opus-4-6.
 
 .PARAMETER Api
-    Which Databricks surface to call: 'openai' (default, /serving-endpoints, bearer auth)
-    or 'anthropic' (/serving-endpoints/anthropic/v1, native Messages API).
+    Which Databricks surface -ConfigureProvider should target: 'openai' (default,
+    /serving-endpoints, bearer auth) or 'anthropic' (/serving-endpoints/anthropic/v1).
 
 .PARAMETER Scope
-    Where to keep the environment variables: 'User' (default, persists in HKCU) or
-    'Process' (this shell only).
-
-.PARAMETER Global
-    Also register the provider, the research server, the researcher agent and the
-    /deep-research command in ~/.config/opencode so they work in every project.
+    Where -ConfigureProvider keeps its environment variables: 'User' (default, persists in
+    HKCU) or 'Process' (this shell only).
 
 .EXAMPLE
-    ./scripts/Install-DeepResearch.ps1 -WorkspaceHost adb-1234567890.12.azuredatabricks.net
+    ./scripts/Install-DeepResearch.ps1
+    Sets up the research server for this repository, using opencode's existing models.
 
 .EXAMPLE
-    ./scripts/Install-DeepResearch.ps1 -WorkspaceHost dbc-abc.cloud.databricks.com -Global -Yes
+    ./scripts/Install-DeepResearch.ps1 -Global
+    Same, and makes the tool, agent, and command available in every project.
+
+.EXAMPLE
+    ./scripts/Install-DeepResearch.ps1 -ConfigureProvider -WorkspaceHost adb-123.4.azuredatabricks.net
+    Also adds a Databricks provider, for an opencode that has no model access yet.
 #>
 [CmdletBinding()]
 param(
+    [switch] $Global,
+    [switch] $ConfigureProvider,
     [string] $WorkspaceHost,
     [string] $Token,
     [string] $Model = 'databricks-claude-opus-4-6',
     [ValidateSet('openai', 'anthropic')] [string] $Api = 'openai',
     [ValidateSet('User', 'Process')] [string] $Scope = 'User',
-    [switch] $Global,
     [switch] $SkipOpencode,
     [switch] $SkipPython,
     [switch] $Yes
@@ -88,6 +104,11 @@ function Add-UserPath {
         Write-Ok "Added $Directory to your user PATH (new shells pick it up)."
     }
     if (($env:Path -split ';') -notcontains $Directory) { $env:Path = "$env:Path;$Directory" }
+}
+
+function Get-OpencodeConfigDirectory {
+    $configHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $env:USERPROFILE '.config' }
+    return Join-Path $configHome 'opencode'
 }
 
 function Resolve-BaseUrl {
@@ -204,28 +225,42 @@ function Install-Opencode {
     Write-Ok "opencode installed: $((opencode --version) -join ' ')"
 }
 
-function Set-DeepResearchEnvironment {
-    param([Parameter(Mandatory)] [string] $BaseUrl, [Parameter(Mandatory)] [string] $AccessToken)
-
-    Write-Step "Configuring the Databricks connection ($Scope scope)"
-    $values = @{ DATABRICKS_BASE_URL = $BaseUrl; DATABRICKS_TOKEN = $AccessToken }
-    foreach ($name in $values.Keys) {
-        Set-Item -Path "Env:$name" -Value $values[$name]
-        if ($Scope -eq 'User') { [Environment]::SetEnvironmentVariable($name, $values[$name], 'User') }
+function Show-AvailableModels {
+    # Model access belongs to the user's opencode setup, so report what it has rather
+    # than configuring anything.
+    Write-Step "Checking which models opencode can reach"
+    if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
+        Write-Note 'opencode is not on PATH yet, so its model list cannot be read.'
+        return
     }
-    Write-Ok "DATABRICKS_BASE_URL = $BaseUrl"
-    Write-Ok "DATABRICKS_TOKEN    = (set, $($AccessToken.Length) characters)"
-    if ($Scope -eq 'User') {
-        Write-Note 'The token is stored in your own environment (HKCU\Environment). Use -Scope Process to keep it in this shell only.'
+
+    $listed = @()
+    try { $listed = @(opencode models 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' }) }
+    catch { Write-Note "Could not run 'opencode models': $($_.Exception.Message)"; return }
+    if ($LASTEXITCODE -ne 0 -or -not $listed) {
+        Write-Note "'opencode models' returned nothing. Check your opencode provider configuration."
+        Write-Note 'If opencode has no Databricks access yet, re-run with -ConfigureProvider -WorkspaceHost <host>.'
+        return
+    }
+
+    $claude = @($listed | Where-Object { $_ -match '(?i)claude|opus|sonnet' })
+    if ($claude) {
+        Write-Ok "$($listed.Count) model(s) available, including:"
+        foreach ($entry in ($claude | Select-Object -First 8)) { Write-Host "      $($entry.Trim())" -ForegroundColor DarkGray }
+        if ($claude.Count -gt 8) { Write-Note "...and $($claude.Count - 8) more Claude models" }
+        Write-Note 'The research agent runs on whichever of these you select in opencode (/model, or --model).'
+    }
+    else {
+        Write-Ok "$($listed.Count) model(s) available, none of them Claude by name."
+        Write-Note 'If opencode has no Databricks access yet, re-run with -ConfigureProvider -WorkspaceHost <host>.'
     }
 }
 
-function Register-GlobalConfig {
-    param([Parameter(Mandatory)] [string] $BaseUrl)
-
+function Register-ResearchServer {
+    # Makes the tool, agent, and command available outside this repository. Only the
+    # research entries are written; everything else in the config is left alone.
     Write-Step 'Registering the research server globally (~/.config/opencode)'
-    $configHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $env:USERPROFILE '.config' }
-    $openCodeDir = Join-Path $configHome 'opencode'
+    $openCodeDir = Get-OpencodeConfigDirectory
     $configPath = Join-Path $openCodeDir 'opencode.json'
     New-Item -ItemType Directory -Force -Path $openCodeDir | Out-Null
 
@@ -237,9 +272,64 @@ function Register-GlobalConfig {
         Write-Note "Existing config backed up to $configPath.bak"
     }
 
-    $config['$schema'] = 'https://opencode.ai/config.json'
-    $config['model'] = "databricks/$Model"
-    if (-not $config.ContainsKey('provider')) { $config['provider'] = @{} }
+    if (-not $config.ContainsKey('$schema')) { $config['$schema'] = 'https://opencode.ai/config.json' }
+    if (-not $config.ContainsKey('mcp')) { $config['mcp'] = @{} }
+    $config['mcp']['deepresearch'] = @{
+        type        = 'local'
+        command     = @('uv', 'run', '--quiet', '--project', $RepoRoot, (Join-Path $RepoRoot 'deep_research.py'))
+        cwd         = $RepoRoot
+        enabled     = $true
+        timeout     = 60000
+        environment = @{ PYTHONUTF8 = '1'; PYTHONIOENCODING = 'utf-8'; DEEP_RESEARCH_MAX_CONTENT = '16000' }
+    }
+    $config | ConvertTo-Json -Depth 20 | Set-Content -Path $configPath -Encoding utf8
+    Write-Ok "Registered the deepresearch server in $configPath"
+    Write-Note 'No model or provider entries were added or changed.'
+
+    foreach ($kind in @('agents', 'commands')) {
+        $source = Join-Path $RepoRoot ".opencode/$kind"
+        if (-not (Test-Path $source)) { continue }
+        $destination = Join-Path $openCodeDir $kind
+        New-Item -ItemType Directory -Force -Path $destination | Out-Null
+        Copy-Item (Join-Path $source '*.md') $destination -Force
+        Write-Ok "Copied $kind into $destination"
+    }
+}
+
+function Register-DatabricksProvider {
+    param([Parameter(Mandatory)] [string] $BaseUrl, [Parameter(Mandatory)] [string] $AccessToken)
+
+    Write-Step "Setting the Databricks connection variables ($Scope scope)"
+    $values = @{ DATABRICKS_BASE_URL = $BaseUrl; DATABRICKS_TOKEN = $AccessToken }
+    foreach ($name in $values.Keys) {
+        Set-Item -Path "Env:$name" -Value $values[$name]
+        if ($Scope -eq 'User') { [Environment]::SetEnvironmentVariable($name, $values[$name], 'User') }
+    }
+    Write-Ok "DATABRICKS_BASE_URL = $BaseUrl"
+    Write-Ok "DATABRICKS_TOKEN    = (set, $($AccessToken.Length) characters)"
+    if ($Scope -eq 'User') {
+        Write-Note 'The token is stored in your own environment (HKCU\Environment). Use -Scope Process to keep it in this shell only.'
+    }
+
+    Write-Step 'Adding the databricks provider to your opencode config'
+    $openCodeDir = Get-OpencodeConfigDirectory
+    $configPath = Join-Path $openCodeDir 'opencode.json'
+    New-Item -ItemType Directory -Force -Path $openCodeDir | Out-Null
+
+    $config = @{}
+    if (Test-Path $configPath) {
+        Copy-Item $configPath "$configPath.bak" -Force
+        $raw = Get-Content $configPath -Raw
+        if ($raw.Trim()) { $config = $raw | ConvertFrom-Json -AsHashtable }
+        Write-Note "Existing config backed up to $configPath.bak"
+    }
+    if ($config.ContainsKey('provider') -and $config['provider'].ContainsKey('databricks')) {
+        if (-not (Confirm-Action 'Your config already has a "databricks" provider. Overwrite it?')) {
+            Write-Note 'Left the existing provider untouched.'
+            return
+        }
+    }
+
     $modelEntry = @{
         name  = Get-ModelDisplayName -EndpointName $Model
         limit = @{ context = 200000; output = 64000 }
@@ -252,32 +342,24 @@ function Register-GlobalConfig {
         $options['headers'] = @{ Authorization = 'Bearer {env:DATABRICKS_TOKEN}' }
         $modelEntry['options'] = @{ toolStreaming = $false }
     }
+
+    if (-not $config.ContainsKey('$schema')) { $config['$schema'] = 'https://opencode.ai/config.json' }
+    if (-not $config.ContainsKey('provider')) { $config['provider'] = @{} }
     $config['provider']['databricks'] = @{
         npm     = if ($Api -eq 'anthropic') { '@ai-sdk/anthropic' } else { '@ai-sdk/openai-compatible' }
         name    = 'Databricks Model Serving'
         options = $options
         models  = @{ $Model = $modelEntry }
     }
-    if (-not $config.ContainsKey('mcp')) { $config['mcp'] = @{} }
-    $config['mcp']['deepresearch'] = @{
-        type        = 'local'
-        command     = @('uv', 'run', '--quiet', '--project', $RepoRoot, (Join-Path $RepoRoot 'deep_research.py'))
-        cwd         = $RepoRoot
-        enabled     = $true
-        timeout     = 60000
-        environment = @{ PYTHONUTF8 = '1'; PYTHONIOENCODING = 'utf-8'; DEEP_RESEARCH_MAX_CONTENT = '16000' }
+    if (-not $config.ContainsKey('model')) {
+        $config['model'] = "databricks/$Model"
+        Write-Note "Set your default model to databricks/$Model (there was none)."
+    }
+    elseif ($config['model'] -ne "databricks/$Model") {
+        Write-Note "Left your default model as $($config['model']); select databricks/$Model with /model when you want it."
     }
     $config | ConvertTo-Json -Depth 20 | Set-Content -Path $configPath -Encoding utf8
-    Write-Ok "Wrote $configPath"
-
-    foreach ($kind in @('agents', 'commands')) {
-        $source = Join-Path $RepoRoot ".opencode/$kind"
-        if (-not (Test-Path $source)) { continue }
-        $destination = Join-Path $openCodeDir $kind
-        New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        Copy-Item (Join-Path $source '*.md') $destination -Force
-        Write-Ok "Copied $kind into $destination"
-    }
+    Write-Ok "Wrote the databricks provider to $configPath"
 }
 
 # --- run -----------------------------------------------------------------------------
@@ -287,51 +369,53 @@ Write-Host 'deep-research for opencode - per-user install' -ForegroundColor Whit
 Write-Host "repository: $RepoRoot"
 Write-Host ''
 
-if (-not $WorkspaceHost) {
-    if ($env:DATABRICKS_BASE_URL) {
-        $baseUrl = $env:DATABRICKS_BASE_URL.TrimEnd('/')
-        Write-Note "Using DATABRICKS_BASE_URL from the environment: $baseUrl"
-    }
-    else {
-        $WorkspaceHost = Read-Host 'Databricks workspace host (e.g. adb-123.4.azuredatabricks.net)'
-        if (-not $WorkspaceHost) { throw 'A workspace host is required.' }
-        $baseUrl = Resolve-BaseUrl -HostName $WorkspaceHost -Surface $Api
-    }
-}
-else {
-    $baseUrl = Resolve-BaseUrl -HostName $WorkspaceHost -Surface $Api
+if ($WorkspaceHost -and -not $ConfigureProvider) {
+    Write-Note '-WorkspaceHost was given, so also configuring the Databricks provider (-ConfigureProvider implied).'
+    $ConfigureProvider = $true
 }
 
-if (-not $Token) {
-    if ($env:DATABRICKS_TOKEN) {
-        $Token = $env:DATABRICKS_TOKEN
-        Write-Note 'Using DATABRICKS_TOKEN from the environment.'
+$baseUrl = $null
+if ($ConfigureProvider) {
+    if (-not $WorkspaceHost) {
+        $WorkspaceHost = Read-Host 'Databricks workspace host (e.g. adb-123.4.azuredatabricks.net)'
+        if (-not $WorkspaceHost) { throw 'A workspace host is required with -ConfigureProvider. Omit it to use the models opencode already has.' }
     }
-    else {
-        $secure = Read-Host 'Databricks personal access token (input hidden)' -AsSecureString
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try { $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    $baseUrl = Resolve-BaseUrl -HostName $WorkspaceHost -Surface $Api
+
+    if (-not $Token) {
+        if ($env:DATABRICKS_TOKEN) {
+            $Token = $env:DATABRICKS_TOKEN
+            Write-Note 'Using DATABRICKS_TOKEN from the environment.'
+        }
+        else {
+            $secure = Read-Host 'Databricks personal access token (input hidden)' -AsSecureString
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            try { $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+            finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        }
     }
+    if (-not $Token) { throw 'A Databricks personal access token is required with -ConfigureProvider.' }
 }
-if (-not $Token) { throw 'A Databricks personal access token is required.' }
 
 Install-Uv
 if (-not $SkipPython) { Install-PythonEnvironment } else { Write-Note 'Skipping the Python environment (-SkipPython).' }
 if (-not $SkipOpencode) { Install-Opencode } else { Write-Note 'Skipping opencode (-SkipOpencode).' }
-Set-DeepResearchEnvironment -BaseUrl $baseUrl -AccessToken $Token
-if ($Global) { Register-GlobalConfig -BaseUrl $baseUrl }
+if ($Global) { Register-ResearchServer }
+if ($ConfigureProvider) { Register-DatabricksProvider -BaseUrl $baseUrl -AccessToken $Token }
+else { Show-AvailableModels }
 
 Write-Host ''
 Write-Step 'Done. Next steps'
 Write-Host "    1. Verify everything:  ./scripts/Test-DeepResearch.ps1"
 Write-Host "    2. Start researching:  ./scripts/Start-DeepResearch.ps1 -Topic 'quantum error correction'"
-Write-Host "    3. Or open the TUI:    opencode"
+Write-Host "    3. Or open the TUI:    opencode --agent researcher"
 Write-Host ''
-Write-Note "Default model: databricks/$Model"
-if ($Api -eq 'anthropic') {
+if (-not $Global) {
+    Write-Note 'The research tool is registered for this repository. Re-run with -Global to use it in every project.'
+}
+if ($ConfigureProvider -and $Api -eq 'anthropic') {
     Write-Host '    Note: the Anthropic surface needs opencode to expand {env:...} inside header values.' -ForegroundColor Yellow
     Write-Host '          If Test-DeepResearch.ps1 reports 401/403, re-run the installer without -Api anthropic.' -ForegroundColor Yellow
 }
-if ($Scope -eq 'User') { Write-Note 'Open a fresh PowerShell window if a tool still reports a missing variable or command.' }
+if ($Scope -eq 'User' -and $ConfigureProvider) { Write-Note 'Open a fresh PowerShell window if a tool still reports a missing variable or command.' }
 Write-Host ''
