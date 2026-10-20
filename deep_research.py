@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
 MCP server that provides a unified research tool for web and academic searches,
-follows relevant links, and returns comprehensive information to Claude.
+follows relevant links, and returns comprehensive information to the calling agent.
+
+Built for the opencode CLI (see opencode.json in this repo), which runs the server
+over stdio and talks to Claude Opus through Databricks Model Serving. Any other
+MCP client that speaks stdio works too.
 
 This server integrates DuckDuckGo for web search and Semantic Scholar for academic content.
 """
 
+import os
 import sys
 import re
 import logging
@@ -20,38 +25,60 @@ logging.basicConfig(
 )
 logger = logging.getLogger("research-assistant")
 
-# Try to import required dependencies
+# Try to import required dependencies.
+# Never install them from here: stdout belongs to the MCP protocol, and installing
+# into a system Python needs privileges the user may not have. The environment is
+# built by scripts/Install-DeepResearch.ps1 (uv) or an explicit venv instead.
 try:
     import httpx
     from bs4 import BeautifulSoup
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
-    print("Installing required dependencies...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "beautifulsoup4", "mcp"])
-    import httpx
-    from bs4 import BeautifulSoup
-    from mcp.server.fastmcp import FastMCP
+    try:
+        # mcp >= 2.0 renamed FastMCP to MCPServer; the decorators used below are the same
+        from mcp.server.mcpserver import MCPServer as McpServer
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as McpServer
+except ImportError as exc:
+    print(
+        f"Missing dependency: {exc.name}. This server expects a prepared environment.\n"
+        "Run scripts/Install-DeepResearch.ps1, or start it with: uv run deep_research.py",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # Initialize server with simple lifespan
 @asynccontextmanager
-async def lifespan(app: FastMCP):
+async def lifespan(app: McpServer):
     """Context manager for server lifecycle"""
     logger.info("Server starting up...")
     yield {}
     logger.info("Server shutting down...")
 
 # Initialize the MCP server
-mcp = FastMCP(
+mcp = McpServer(
     "research-assistant",
     dependencies=["httpx", "beautifulsoup4"],
     lifespan=lifespan
 )
 
-# Configuration
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-MAX_CONTENT_SIZE = 8000  # Maximum characters in the final response
-MAX_RESULTS = 3         # Maximum number of results to process
+def _env_int(name, default):
+    """Read a positive int from the environment, falling back to default"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} is not an integer, using {default}")
+        return default
+    if value < 1:
+        logger.warning(f"{name}={value} is not positive, using {default}")
+        return default
+    return value
+
+# Configuration (overridable through the MCP server's "environment" block in opencode.json)
+USER_AGENT = os.environ.get("DEEP_RESEARCH_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+MAX_CONTENT_SIZE = _env_int("DEEP_RESEARCH_MAX_CONTENT", 8000)  # Maximum characters in the final response
+MAX_RESULTS = _env_int("DEEP_RESEARCH_MAX_RESULTS", 3)          # Maximum number of results to process
 
 def safe_truncate(text, max_length, suffix="...\n[Content truncated due to size limits]"):
     """Safely truncate text to max_length with a suffix"""
@@ -381,8 +408,8 @@ async def _follow_link(url: str) -> str:
         logger.error(f"Error following link: {str(e)}")
         raise  # Re-raise to handle in the main function
 
-@mcp.prompt()
-def deep_research(topic: str) -> str:
+@mcp.prompt(name="deep_research")
+def deep_research_prompt(topic: str) -> str:
     """
     Create a prompt for comprehensive, multi-stage research on a topic.
 
@@ -395,23 +422,26 @@ def deep_research(topic: str) -> str:
     return (
         f"I need to do comprehensive research on: {topic}\n\n"
         f"Please follow this multi-step research process:\n\n"
-        f"1. INITIAL EXPLORATION: Use the deep_research tool to gather information from both web and academic sources.\n\n"
+        f"1. INITIAL EXPLORATION: Use the deep_research tool (exposed as "
+        f"deepresearch_deep_research in opencode) to gather information from both web and "
+        f"academic sources.\n\n"
         f"2. PRELIMINARY SYNTHESIS: Organize the key findings, identifying main concepts, perspectives, and knowledge gaps. "
-        f"Create an artifact for your synthesis to improve readability and organization. Include sections for methodology, "
-        f"key findings, and areas requiring further investigation.\n\n"
-        f"3. VISUAL REPRESENTATION: Where appropriate, create data visualizations to illustrate key concepts, trends, "
-        f"or relationships found in the research. Consider using:\n"
-        f"   - Timeline charts for historical developments\n"
+        f"Write the synthesis to research/{{slug}}-notes.md so it survives the session and can be reviewed. Include sections "
+        f"for methodology, key findings, and areas requiring further investigation.\n\n"
+        f"3. VISUAL REPRESENTATION: Where appropriate, add diagrams or tables to illustrate key concepts, trends, "
+        f"or relationships found in the research. Markdown and Mermaid both render in most viewers; consider:\n"
+        f"   - Mermaid timelines for historical developments\n"
         f"   - Comparison tables for contrasting perspectives\n"
-        f"   - Concept maps to show relationships between ideas\n"
-        f"   - Flowcharts to illustrate processes\n"
-        f"   - Bar/pie charts for statistical information\n"
-        f"Present these visualizations as part of your analysis artifact.\n\n"
+        f"   - Mermaid graphs as concept maps between ideas\n"
+        f"   - Mermaid flowcharts to illustrate processes\n"
+        f"   - Tables with figures for statistical information\n"
+        f"Keep these inside the markdown report.\n\n"
         f"4. FOLLOW-UP RESEARCH: Based on the initial findings, identify 2-3 specific aspects that need deeper investigation. "
         f"Conduct targeted follow-up research on these aspects using the deep_research tool again with more specific queries.\n\n"
         f"5. COMPREHENSIVE SYNTHESIS: Integrate all gathered information into a coherent summary that explains the main points, "
         f"different perspectives, and current understanding of the topic. Highlight how the follow-up research addressed the "
-        f"knowledge gaps or expanded on key concepts from the initial exploration. Create a final artifact that includes:\n"
+        f"knowledge gaps or expanded on key concepts from the initial exploration. Write the final report to "
+        f"research/{{slug}}-report.md with:\n"
         f"   - Executive summary\n"
         f"   - Methodology\n"
         f"   - Key findings with visualizations\n"
@@ -423,6 +453,7 @@ def deep_research(topic: str) -> str:
         f"Author, A. A. (Year, Month Day). Title of page. Site Name. URL\n\n"
         f"For academic sources, use:\n"
         f"Author, A. A., & Author, B. B. (Year). Title of article. Journal Name, Volume(Issue), page range. DOI or URL\n\n"
+        f"Cite only sources the tool actually returned; never invent a citation to fill a gap.\n\n"
         f"This iterative approach with proper citations and visual elements will provide a thorough understanding of {topic} "
         f"that integrates information from multiple authoritative sources and presents it in a well-organized, visually "
         f"enhanced format."

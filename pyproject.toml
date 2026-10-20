@@ -1,0 +1,16 @@
+[project]
+name = "deep-research-mcp"
+version = "0.2.0"
+description = "MCP research server (web + academic search) for the opencode CLI"
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.9.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+# Not an installable package - just a script plus its dependencies, so `uv run`
+# and `uv sync` work without a build backend.
+[tool.uv]
+package = false
