@@ -4,15 +4,16 @@ An MCP server that gives a coding agent real research capability — web search,
 search, link following, and content extraction — packaged for the
 [opencode](https://opencode.ai) CLI.
 
-It adds a tool, an agent, and a command. It does **not** touch model access: the research
-agent runs on whichever model opencode already offers you — for example
+It adds a tool, an agent, and two commands. It does **not** touch model access: the
+research agent runs on whichever model opencode already offers you — for example
 `databricks/databricks-claude-opus-4-6` on Databricks Model Serving — and your provider
-configuration is left exactly as it is. If opencode has no model access yet, the installer
-can set up a Databricks provider for you, but only when you ask for it.
+configuration is left exactly as it is.
 
-Everything installs and runs under your own user account: no administrator rights, no
-system Python, no system PATH changes. **PowerShell 7 only** — there is no bash anywhere in
-this repo.
+There is no installer: opencode registers the server from `opencode.json` and `uv`
+provisions it on first start, all under your own user account — no administrator rights, no
+system Python. What setup remains runs inside opencode as `/research-setup`. The one
+standalone script is a diagnostic, in **PowerShell 7**; there is no bash anywhere in this
+repo.
 
 ## Overview
 
@@ -32,32 +33,40 @@ one-command install on a locked-down Windows box.
 
 | | |
 |---|---|
-| PowerShell | 7.0 or later (developed against 7.6.7) |
-| Python | none installed by hand — `uv` manages it |
-| Models | already available in opencode (any provider). Only needed for `-ConfigureProvider`: a Databricks workspace host and a personal access token |
+| opencode | installed, with model access already configured (any provider) |
+| uv | installs Python and the server's dependencies — one per-user command if missing |
+| PowerShell | 7.0 or later, for the diagnostics script (developed against 7.6.7) |
 | Network | HTTPS to `html.duckduckgo.com` and `api.semanticscholar.org` (see [Network](#network)) |
 | Browser, search CLI | not needed — the server makes its own HTTPS requests |
 | Admin rights | not needed |
 
-The installer fetches [uv](https://docs.astral.sh/uv/) (into `%USERPROFILE%\.local\bin`)
-and opencode (via scoop, npm, or the release binary into
-`%LOCALAPPDATA%\Programs\opencode`) only if they are missing.
-
 ## Install
+
+There is no installer. opencode reads `opencode.json` from the project root, and `uv`
+provisions the server's environment from `uv.lock` the first time the server starts:
 
 ```powershell
 git clone https://github.com/PieterJorissen/Claude-Deep-Research.git
 cd Claude-Deep-Research
-./scripts/Install-DeepResearch.ps1 -Global
+opencode                       # the research tool is already registered here
 ```
 
-No workspace host, no token, no provider questions: the installer sets up the server
-environment, checks opencode, reports which models opencode can reach, and registers the
-research tool. `-Global` puts the tool, agent, and command in `~/.config/opencode` so they
-work in every project; leave it off to keep them to this repository. `-Yes` accepts the
-downloads without prompting.
+If `uv` is missing, one per-user command installs it into `%USERPROFILE%\.local\bin`:
 
-Then check it:
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+To use the tool in other projects too, run `/research-setup` inside opencode. It warms the
+environment, adds one `mcp` entry to your own `~/.config/opencode/opencode.json` with
+absolute paths, copies the agent and command, and leaves every other setting — `model`,
+`provider`, everything — exactly as it was. opencode reads its config at startup, so
+restart it afterwards.
+
+Nothing here configures model access: the research agent runs on whichever model you
+select in opencode (`/model`, or `--model provider/model`).
+
+### Check it
 
 ```powershell
 ./scripts/Test-DeepResearch.ps1
@@ -66,46 +75,27 @@ Then check it:
 ```
 [PASS] PowerShell 7+             7.6.7
 [PASS] uv on PATH                uv 0.11.32
-[PASS] server environment        C:\src\Claude-Deep-Research\.venv
 [PASS] MCP handshake             server 'research-assistant', tools: deep_research
 [PASS] tool name in opencode     deepresearch_deep_research
 [PASS] opencode on PATH          1.0.x
 [PASS] model access              7 model(s), including databricks/databricks-claude-opus-4-6
-[SKIP] Databricks connection     DATABRICKS_* not set - model access comes from your own opencode configuration
 [PASS] reach html.duckduckgo.com HTTP 200
 [PASS] reach api.semanticscholar.org HTTP 200
 [PASS] opencode mcp list         deepresearch connected
 ```
 
-It exits non-zero if a check fails, so it works as a smoke test. `-Quick` skips the checks
-that need network access.
-
-### If opencode has no model access yet
-
-Only then does the installer need workspace details, and only when you ask:
-
-```powershell
-./scripts/Install-DeepResearch.ps1 -Global -ConfigureProvider -WorkspaceHost adb-1234567890.12.azuredatabricks.net
-```
-
-It prompts for a personal access token (input hidden) and adds a `databricks` provider to
-your own `~/.config/opencode/opencode.json`, backing up the previous file first. It will
-not overwrite an existing `databricks` provider without asking, and it leaves your default
-`model` alone if you already have one. Skip this entirely if a Databricks provider is
-already configured — by the Unity Gateway launcher, by your team's config, or by hand.
+This one stays a script rather than an opencode command on purpose: it has to work when
+the server will not start, which is exactly when opencode cannot tell you why. It exits
+non-zero if a check fails, and `-Quick` skips the checks that need network access.
 
 ## Use it
 
 ```powershell
 # Interactive, on the researcher agent
-./scripts/Start-DeepResearch.ps1
+opencode --agent researcher
 
 # One-shot: runs the /deep-research command and prints the result
-./scripts/Start-DeepResearch.ps1 -Topic 'room-temperature superconductors since 2023'
-
-# Raw opencode, same thing
-opencode run --command deep-research 'quantum error correction'
-opencode --agent researcher
+opencode run --command deep-research 'room-temperature superconductors since 2023'
 ```
 
 Inside a session:
@@ -127,6 +117,7 @@ Research the latest developments in quantum computing, then write it up with cit
 | `deepresearch_deep_research` tool | `deep_research.py` | web + academic search, follows the top results, returns extracted content |
 | `researcher` agent | `.opencode/agents/researcher.md` | search-before-answering, cite-only-what-you-saw, write reports to `research/` |
 | `/deep-research` command | `.opencode/commands/deep-research.md` | the five-stage process: explore, synthesize, visualize, follow up, report |
+| `/research-setup` command | `.opencode/commands/research-setup.md` | registers the tool, agent, and command for every project, from inside opencode |
 | `deep_research` MCP prompt | `deep_research.py` | the same process for MCP clients that expose prompts |
 
 ### Tool arguments
@@ -221,67 +212,16 @@ and point the variable at it — no admin rights involved.
 TLS-inspected, rate-limited (`429`), or served a bot challenge (`202`). The last two mean
 the network is fine and the search engine is throttling this address.
 
-### What -ConfigureProvider writes
-
-Only relevant if you asked the installer to set up Databricks access. It writes to your own
-`~/.config/opencode/opencode.json`:
-
-```json
-{
-  "provider": {
-    "databricks": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "baseURL": "https://adb-123.4.azuredatabricks.net/serving-endpoints",
-        "apiKey": "{env:DATABRICKS_TOKEN}"
-      },
-      "models": {
-        "databricks-claude-opus-4-6": { "name": "Claude Opus 4.6 (Databricks)" }
-      }
-    }
-  }
-}
-```
-
-The token is not written to the file; it is read from the environment:
-
-| Variable | Example | Set by |
-|---|---|---|
-| `DATABRICKS_BASE_URL` | `https://adb-123.4.azuredatabricks.net/serving-endpoints` | installer, from `-WorkspaceHost` |
-| `DATABRICKS_TOKEN` | `dapi…` | installer, prompted |
-
-`-Scope Process` keeps both in the current shell only instead of persisting them for your
-user. To keep the token out of the environment entirely, put it in a file and point the
-config at it: `"apiKey": "{file:~/.databricks/opencode-token}"`. Pick the endpoint with
-`-Model`, and raise `limit.context` / `limit.output` in the written block if your endpoint
-allows more — those only tell opencode how to track context.
-
-#### Databricks surfaces
-
-The default is the OpenAI-compatible surface at `/serving-endpoints`, because its bearer
-authentication is exactly what opencode's `apiKey` option sends.
-
-Databricks also serves the native Anthropic Messages API at
-`/serving-endpoints/anthropic/v1` (and `/ai-gateway/anthropic/v1` through Unity Gateway).
-`-Api anthropic` configures that instead: `@ai-sdk/anthropic`, `toolStreaming: false`, and
-an explicit `Authorization: Bearer` header, since the Anthropic provider would otherwise
-send `x-api-key`, which Databricks rejects. That header depends on your opencode build
-expanding `{env:...}` inside header values — run `Test-DeepResearch.ps1` after switching,
-and fall back to the default surface if it reports 401 or 403.
-
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| `opencode: command not found` after installing | PATH changes land in new shells. Open a fresh PowerShell window. |
-| Installer asks for a workspace host | You passed `-ConfigureProvider` or `-WorkspaceHost`. Leave both off to use the models opencode already has. |
-| `model access` lists nothing | opencode has no provider configured. Fix that in your own opencode config, or use `-ConfigureProvider`. |
+| `uv: command not found` | `irm https://astral.sh/uv/install.ps1 | iex`, then open a fresh shell — PATH changes only reach new ones. |
+| `model access` lists nothing | opencode has no provider configured. That is your opencode config's job, not this repository's. |
 | Agent runs on the wrong model | Model selection is yours: `/model` in a session, `--model provider/model`, or a `model:` line in `.opencode/agents/researcher.md`. |
-| `401` / `403` on the Databricks connection check | Only applies when `DATABRICKS_*` are set. Token expired, belongs to another workspace, or lacks access to the endpoint. |
-| `404` on the Databricks connection check | Endpoint name or base URL path is wrong. Check the endpoint name in Serving and that the URL ends in `/serving-endpoints`. |
-| Credentials look empty, no obvious error | `{env:...}` becomes an empty string when a variable is unset. Check 6 catches a half-set pair. |
-| `deepresearch` missing from `opencode mcp list` | opencode was started outside the repository. Run it from here, or install with `-Global`. |
+| `deepresearch` missing from `opencode mcp list` | opencode was started outside the repository, or it has not restarted since `/research-setup`. Config is read at startup. |
 | MCP handshake fails | Run `uv run deep_research.py` directly — the server logs to stderr. |
+| First tool call is slow or times out | `uv` is resolving dependencies. Run `uv sync --frozen` once, or `/research-setup`, which does it for you. |
 | Scripts refuse to run | Per-user execution policy, no admin needed: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
 | Searches time out or return little | DuckDuckGo and Semantic Scholar both rate-limit. Narrow the query and retry. |
 | `reach html.duckduckgo.com` fails with an SSL error | A TLS-inspecting proxy. Set `SSL_CERT_FILE` to your corporate root certificate (see Network). |
@@ -296,28 +236,21 @@ and fall back to the default surface if it reports 401 or 403.
 uv run --project <path-to-repo> deep_research.py
 ```
 
-It needs `mcp`, `httpx`, and `beautifulsoup4` (`mcp` 1.x and 2.x are both supported). For a
-plain virtual environment instead of uv:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe deep_research.py
-```
+`uv` reads `pyproject.toml` and `uv.lock` and provisions everything itself, including the
+Python interpreter. It needs `mcp` 2.x (the SDK release that renamed `FastMCP` to
+`MCPServer`), `httpx`, and `beautifulsoup4`.
 
 ## Repository layout
 
 ```
-deep_research.py                     the MCP server (tool + prompt)
-opencode.json                        MCP server registration (no model, no provider)
-pyproject.toml / uv.lock             pinned server dependencies
-requirements.txt                     same dependencies for a plain venv
-AGENTS.md                            working notes for agents editing this repo
-.opencode/agents/researcher.md       the research agent
-.opencode/commands/deep-research.md  the /deep-research command
-scripts/Install-DeepResearch.ps1     per-user install and configuration
-scripts/Test-DeepResearch.ps1        diagnostics, exits non-zero on failure
-scripts/Start-DeepResearch.ps1       launcher for the TUI and one-shot runs
+deep_research.py                      the MCP server (tool + prompt)
+opencode.json                         MCP server registration (no model, no provider)
+pyproject.toml / uv.lock              server dependencies, hash-pinned
+AGENTS.md                             working notes for agents editing this repo
+.opencode/agents/researcher.md        the research agent
+.opencode/commands/deep-research.md   the /deep-research command
+.opencode/commands/research-setup.md  global registration, run from inside opencode
+scripts/Test-DeepResearch.ps1         diagnostics, exits non-zero on failure
 ```
 
 ## Ported from the Claude Desktop version
@@ -329,14 +262,16 @@ changed:
   `opencode.json` rather than `claude_desktop_config.json`.
 - **Model**: whatever opencode offers — Claude Opus on Databricks Model Serving in the
   setup this was built for. The repository deliberately configures no provider and no
-  model, so it cannot override an existing opencode setup; `-ConfigureProvider` adds a
-  Databricks provider for an opencode that has none.
+  model, so it cannot override an existing opencode setup. Configuring a provider is your
+  opencode installation's job, not this repository's.
 - **Prompt**: the multi-stage research prompt became an opencode command and agent, and
   writes markdown reports to `research/` instead of Claude Desktop artifacts.
-- **Install**: PowerShell 7 scripts and uv, all per-user. The server no longer shells out
-  to `pip` on startup — that wrote to whichever Python it found (often needing admin) and
-  printed to stdout, which is where the MCP protocol lives.
-- **SDK**: works with both `mcp` 1.x (`FastMCP`) and 2.x (`MCPServer`).
+- **Install**: none. `opencode.json` registers the server and `uv` provisions it from
+  `uv.lock` on first start, all per-user. The server no longer shells out to `pip` on
+  startup — that wrote to whichever Python it found (often needing admin) and printed to
+  stdout, which is where the MCP protocol lives. What setup remains (`/research-setup`)
+  runs inside opencode, where the work belongs.
+- **SDK**: `mcp` 2.x (`MCPServer`), the release that renamed `FastMCP`.
 
 ## Acknowledgments
 

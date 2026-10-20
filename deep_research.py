@@ -27,34 +27,29 @@ logger = logging.getLogger("research-assistant")
 
 # Try to import required dependencies.
 # Never install them from here: stdout belongs to the MCP protocol, and installing
-# into a system Python needs privileges the user may not have. The environment is
-# built by scripts/Install-DeepResearch.ps1 (uv) or an explicit venv instead.
+# into a system Python needs privileges the user may not have. Start the server through
+# uv (see opencode.json), which provisions the environment from uv.lock by itself.
 try:
     import httpx
     from bs4 import BeautifulSoup
-    try:
-        # mcp >= 2.0 renamed FastMCP to MCPServer; the decorators used below are the same
-        from mcp.server.mcpserver import MCPServer as McpServer
-    except ImportError:
-        from mcp.server.fastmcp import FastMCP as McpServer
+    from mcp.server.mcpserver import MCPServer
 except ImportError as exc:
     print(
-        f"Missing dependency: {exc.name}. This server expects a prepared environment.\n"
-        "Run scripts/Install-DeepResearch.ps1, or start it with: uv run deep_research.py",
+        f"Missing dependency: {exc.name}. Start this server with: uv run deep_research.py",
         file=sys.stderr,
     )
     sys.exit(1)
 
 # Initialize server with simple lifespan
 @asynccontextmanager
-async def lifespan(app: McpServer):
+async def lifespan(app: MCPServer):
     """Context manager for server lifecycle"""
     logger.info("Server starting up...")
     yield {}
     logger.info("Server shutting down...")
 
 # Initialize the MCP server
-mcp = McpServer(
+mcp = MCPServer(
     "research-assistant",
     dependencies=["httpx", "beautifulsoup4"],
     lifespan=lifespan
