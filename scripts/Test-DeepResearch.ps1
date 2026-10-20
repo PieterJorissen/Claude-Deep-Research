@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Checks that the deep-research MCP server, opencode, and the Databricks connection work.
+    Checks that the deep-research MCP server works and that opencode can see it.
 
 .DESCRIPTION
     Runs independent checks and prints one line per check. Exits 1 if any check fails, so
@@ -10,16 +10,21 @@
       1. PowerShell version
       2. uv and the server environment (.venv)
       3. MCP handshake over stdio: initialize, tools/list, prompts/list
-      4. DATABRICKS_BASE_URL / DATABRICKS_TOKEN
-      5. A one-token request to the Databricks endpoint (skipped with -Quick)
-      6. Reachability of the two research hosts (skipped with -Quick)
-      7. opencode and its view of the configured MCP servers
+      4. opencode on PATH
+      5. Models opencode can reach (skipped with -Quick)
+      6. Databricks connection - only when this repo's installer configured one
+      7. Reachability of the two research hosts (skipped with -Quick)
+      8. opencode's view of the configured MCP servers (skipped with -Quick)
+
+    Model access is not this repository's business: if DATABRICKS_BASE_URL and
+    DATABRICKS_TOKEN are not set, check 6 is skipped and check 5 reports what your own
+    opencode configuration provides.
 
 .PARAMETER Quick
-    Skip the checks that need network access (5, 6 and 7).
+    Skip the checks that need network access (5, 7 and 8).
 
 .PARAMETER Model
-    Serving endpoint to probe in check 5. Defaults to databricks-claude-opus-4-6.
+    Serving endpoint to probe in check 6. Defaults to databricks-claude-opus-4-6.
 
 .EXAMPLE
     ./scripts/Test-DeepResearch.ps1
@@ -94,7 +99,7 @@ function Invoke-McpProbe {
             $message = $line | ConvertFrom-Json
             if ($message.PSObject.Properties.Name -contains 'id') { $replies[[int] $message.id] = $message }
         }
-        return @{ Replies = $replies; Stderr = '' }
+        return $replies
     }
     finally {
         if (-not $process.HasExited) { $process.Kill($true) }
@@ -139,8 +144,7 @@ if (-not $uv) {
 }
 else {
     try {
-        $probe = Invoke-McpProbe
-        $replies = $probe.Replies
+        $replies = Invoke-McpProbe
         if (-not $replies.ContainsKey(1)) {
             Write-Result fail 'MCP handshake' 'no initialize response; run "uv run deep_research.py" to see the error'
         }
@@ -162,36 +166,58 @@ else {
     }
 }
 
-# 4. Databricks settings ----------------------------------------------------------------
-$baseUrl = $env:DATABRICKS_BASE_URL
-$token = $env:DATABRICKS_TOKEN
-if ($baseUrl -and $token) {
-    Write-Result pass 'Databricks settings' "$baseUrl (token: $($token.Length) characters)"
-}
-elseif ($baseUrl) {
-    Write-Result fail 'Databricks settings' 'DATABRICKS_TOKEN is not set in this shell'
+# 4. opencode ---------------------------------------------------------------------------
+$opencode = Get-Command opencode -ErrorAction SilentlyContinue
+if ($opencode) {
+    Write-Result pass 'opencode on PATH' "$((opencode --version) -join ' ') at $($opencode.Source)"
 }
 else {
-    Write-Result fail 'Databricks settings' 'DATABRICKS_BASE_URL and DATABRICKS_TOKEN are not set; run ./scripts/Install-DeepResearch.ps1'
+    Write-Result fail 'opencode on PATH' 'run ./scripts/Install-DeepResearch.ps1, or open a new shell if it was just installed'
 }
 
-# 5. Live model call --------------------------------------------------------------------
-if ($Quick) {
-    Write-Result skip 'Databricks model call' '-Quick'
+# 5. Model access -----------------------------------------------------------------------
+# Whatever provides the models - this repo's installer, the Unity Gateway launcher, or a
+# config written by hand - the research agent just uses what opencode offers.
+if (-not $opencode) {
+    Write-Result skip 'model access' 'needs opencode'
+}
+elseif ($Quick) {
+    Write-Result skip 'model access' '-Quick'
+}
+else {
+    $models = @()
+    try { $models = @(opencode models 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' }) } catch { }
+    if (-not $models) {
+        Write-Result fail 'model access' "'opencode models' listed nothing - configure a provider in opencode, or run the installer with -ConfigureProvider -WorkspaceHost <host>"
+    }
+    else {
+        $claude = @($models | Where-Object { $_ -match '(?i)claude|opus|sonnet' })
+        if ($claude) {
+            Write-Result pass 'model access' "$($models.Count) model(s), including $(($claude | Select-Object -First 3 | ForEach-Object { $_.Trim() }) -join ', ')"
+        }
+        else {
+            Write-Result warn 'model access' "$($models.Count) model(s) available, none named like a Claude model"
+        }
+    }
+}
+
+# 6. Databricks connection (only when this repo configured one) -------------------------
+$baseUrl = $env:DATABRICKS_BASE_URL
+$token = $env:DATABRICKS_TOKEN
+if (-not $baseUrl -and -not $token) {
+    Write-Result skip 'Databricks connection' 'DATABRICKS_* not set - model access comes from your own opencode configuration (check 5)'
 }
 elseif (-not ($baseUrl -and $token)) {
-    Write-Result skip 'Databricks model call' 'needs DATABRICKS_BASE_URL and DATABRICKS_TOKEN'
+    $missing = if ($baseUrl) { 'DATABRICKS_TOKEN' } else { 'DATABRICKS_BASE_URL' }
+    Write-Result fail 'Databricks connection' "$missing is not set in this shell, but the other one is - an empty {env:...} substitution reads as an auth failure"
+}
+elseif ($Quick) {
+    Write-Result skip 'Databricks connection' '-Quick'
 }
 else {
     $isAnthropic = $baseUrl -match '/anthropic(/v1)?/?$'
-    if ($isAnthropic) {
-        $url = "$($baseUrl.TrimEnd('/'))/messages"
-        $body = @{ model = $Model; max_tokens = 1; messages = @(@{ role = 'user'; content = 'ping' }) }
-    }
-    else {
-        $url = "$($baseUrl.TrimEnd('/'))/chat/completions"
-        $body = @{ model = $Model; max_tokens = 1; messages = @(@{ role = 'user'; content = 'ping' }) }
-    }
+    $url = if ($isAnthropic) { "$($baseUrl.TrimEnd('/'))/messages" } else { "$($baseUrl.TrimEnd('/'))/chat/completions" }
+    $body = @{ model = $Model; max_tokens = 1; messages = @(@{ role = 'user'; content = 'ping' }) }
     try {
         $response = Invoke-WebRequest -Uri $url -Method Post -TimeoutSec 90 -SkipHttpErrorCheck `
             -Headers @{ Authorization = "Bearer $token" } `
@@ -203,24 +229,24 @@ else {
                 $fields = if ($payload) { $payload.PSObject.Properties.Name } else { @() }
                 $expected = if ($isAnthropic) { 'content' } else { 'choices' }
                 if ($fields -contains $expected) {
-                    Write-Result pass 'Databricks model call' "$Model answered over $(if ($isAnthropic) { 'the Messages API' } else { 'chat/completions' })"
+                    Write-Result pass 'Databricks connection' "$Model answered over $(if ($isAnthropic) { 'the Messages API' } else { 'chat/completions' })"
                 }
                 else {
-                    Write-Result warn 'Databricks model call' "$url returned 200 but no '$expected' field - is DATABRICKS_BASE_URL pointing at the serving endpoint?"
+                    Write-Result warn 'Databricks connection' "$url returned 200 but no '$expected' field - is DATABRICKS_BASE_URL pointing at the serving endpoint?"
                 }
             }
-            401 { Write-Result fail 'Databricks model call' "401 from $url - the token is wrong, expired, or belongs to another workspace" }
-            403 { Write-Result fail 'Databricks model call' "403 from $url - the token lacks access to this serving endpoint" }
-            404 { Write-Result fail 'Databricks model call' "404 from $url - check the endpoint name '$Model' and the base URL path" }
-            default { Write-Result fail 'Databricks model call' "HTTP $($response.StatusCode) from $url : $($response.Content -replace '\s+', ' ')" }
+            401 { Write-Result fail 'Databricks connection' "401 from $url - the token is wrong, expired, or belongs to another workspace" }
+            403 { Write-Result fail 'Databricks connection' "403 from $url - the token lacks access to this serving endpoint" }
+            404 { Write-Result fail 'Databricks connection' "404 from $url - check the endpoint name '$Model' and the base URL path" }
+            default { Write-Result fail 'Databricks connection' "HTTP $($response.StatusCode) from $url : $($response.Content -replace '\s+', ' ')" }
         }
     }
     catch {
-        Write-Result fail 'Databricks model call' "$url - $($_.Exception.Message)"
+        Write-Result fail 'Databricks connection' "$url - $($_.Exception.Message)"
     }
 }
 
-# 6. Research hosts ---------------------------------------------------------------------
+# 7. Research hosts ---------------------------------------------------------------------
 # The server talks HTTPS to these two hosts directly - no browser, no search CLI. On a
 # corporate network they are the usual thing to be blocked or TLS-inspected.
 $researchHosts = [ordered] @{
@@ -253,32 +279,28 @@ foreach ($entry in $researchHosts.GetEnumerator()) {
     }
 }
 
-# 7. opencode ---------------------------------------------------------------------------
-$opencode = Get-Command opencode -ErrorAction SilentlyContinue
+# 8. opencode's view of the MCP servers -------------------------------------------------
 if (-not $opencode) {
-    Write-Result fail 'opencode on PATH' 'run ./scripts/Install-DeepResearch.ps1, or open a new shell if it was just installed'
+    Write-Result skip 'opencode mcp list' 'needs opencode'
+}
+elseif ($Quick) {
+    Write-Result skip 'opencode mcp list' '-Quick'
 }
 else {
-    Write-Result pass 'opencode on PATH' "$((opencode --version) -join ' ') at $($opencode.Source)"
-    if ($Quick) {
-        Write-Result skip 'opencode mcp list' '-Quick'
-    }
-    else {
-        $job = Start-Job -ScriptBlock { Set-Location $using:RepoRoot; opencode mcp list 2>&1 | Out-String }
-        if (Wait-Job $job -Timeout 120) {
-            $output = (Receive-Job $job) -join "`n"
-            if ($output -match 'deepresearch') {
-                Write-Result pass 'opencode mcp list' ($output.Trim() -replace '\s+', ' ')
-            }
-            else {
-                Write-Result warn 'opencode mcp list' "deepresearch not listed. Run opencode from $RepoRoot, or install globally with -Global. Output: $($output.Trim() -replace '\s+', ' ')"
-            }
+    $job = Start-Job -ScriptBlock { Set-Location $using:RepoRoot; opencode mcp list 2>&1 | Out-String }
+    if (Wait-Job $job -Timeout 120) {
+        $output = (Receive-Job $job) -join "`n"
+        if ($output -match 'deepresearch') {
+            Write-Result pass 'opencode mcp list' ($output.Trim() -replace '\s+', ' ')
         }
         else {
-            Write-Result warn 'opencode mcp list' 'timed out after 120s'
+            Write-Result warn 'opencode mcp list' "deepresearch not listed. Run opencode from $RepoRoot, or install globally with -Global. Output: $($output.Trim() -replace '\s+', ' ')"
         }
-        Remove-Job $job -Force
     }
+    else {
+        Write-Result warn 'opencode mcp list' 'timed out after 120s'
+    }
+    Remove-Job $job -Force
 }
 
 Write-Host ''
