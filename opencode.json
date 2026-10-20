@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "databricks/databricks-claude-opus-4-6",
+  "small_model": "databricks/databricks-claude-opus-4-6",
+  "provider": {
+    "databricks": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Databricks Model Serving",
+      "options": {
+        "baseURL": "{env:DATABRICKS_BASE_URL}",
+        "apiKey": "{env:DATABRICKS_TOKEN}"
+      },
+      "models": {
+        "databricks-claude-opus-4-6": {
+          "name": "Claude Opus 4.6 (Databricks)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "deepresearch": {
+      "type": "local",
+      "command": ["uv", "run", "--quiet", "--project", ".", "deep_research.py"],
+      "cwd": ".",
+      "enabled": true,
+      "timeout": 60000,
+      "environment": {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "DEEP_RESEARCH_MAX_CONTENT": "16000",
+        "DEEP_RESEARCH_MAX_RESULTS": "3"
+      }
+    }
+  }
+}

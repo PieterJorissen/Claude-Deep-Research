@@ -1,141 +1,263 @@
-# Claude Deep Research
+# Deep Research for opencode
 
-An MCP (Model Context Protocol) server that enables comprehensive research capabilities for Claude and other MCP-compatible AI assistants. This server integrates web and academic search functionality, allowing AI models to access current information from multiple sources, follow relevant links, and provide well-structured research results.
+An MCP server that gives a coding agent real research capability — web search, academic
+search, link following, and content extraction — wired up for the
+[opencode](https://opencode.ai) CLI running **Claude Opus on Databricks Model Serving**
+(`databricks/databricks-claude-opus-4-6`).
+
+Everything installs and runs under your own user account: no administrator rights, no
+system Python, no system PATH changes. **PowerShell 7 only** — there is no bash anywhere in
+this repo.
 
 ## Overview
 
-Claude Deep Research is a powerful research tool that extends the capabilities of LLMs by providing:
-
-1. **Web search** integration through DuckDuckGo
-2. **Academic research** access through Semantic Scholar 
-3. **Content extraction** from web pages
-4. **Comprehensive analysis** with structured formatting
-5. **Visualization guidance** for data representation
-
-The server follows MCP design principles to provide a seamless integration with Claude and other AI assistants.
-
-## Features
-
-- **Unified Research Tool**: Single interface for web and academic information
-- **Multi-Source Integration**: Combines information from various sources into cohesive research
-- **Content Extraction**: Pulls relevant information from web pages
-- **Academic Source Discovery**: Finds scholarly articles related to your topic
-- **Smart Formatting**: Properly formats research with citations
-- **Visual Framework**: Provides guidance for creating effective data visualizations
-- **Structured Analysis**: Organizes research using academic methodologies
+1. **Web search** through DuckDuckGo
+2. **Academic search** through Semantic Scholar
+3. **Content extraction** from the pages those searches return
+4. **A research agent and a `/deep-research` command** that drive a multi-stage process
+5. **APA citations** of the sources the tool actually returned
 
 ![Research Workflow](./workflow.png)
 
-## Installation
+The Python server speaks plain MCP over stdio, so any MCP client can use it. The opencode
+pieces (`opencode.json`, `.opencode/`) and the PowerShell scripts are what make it a
+one-command install on a locked-down Windows box.
 
-### Prerequisites
+## Requirements
 
-- Python 3.8 or higher
-- pip or uv package manager
+| | |
+|---|---|
+| PowerShell | 7.0 or later (developed against 7.6.7) |
+| Python | none installed by hand — `uv` manages it |
+| Databricks | a workspace with a Claude serving endpoint and a personal access token |
+| Admin rights | not needed |
 
-### Quick Install
+The installer fetches [uv](https://docs.astral.sh/uv/) (into `%USERPROFILE%\.local\bin`)
+and opencode (via scoop, npm, or the release binary into
+`%LOCALAPPDATA%\Programs\opencode`) only if they are missing.
 
-```bash
-# Using pip
-pip install mcp httpx beautifulsoup4
+## Install
 
-# Clone the repository
-git clone https://github.com/yourusername/claude-deep-research.git
+```powershell
+git clone https://github.com/pieterjorissen/claude-deep-research.git
+cd claude-deep-research
+./scripts/Install-DeepResearch.ps1 -WorkspaceHost adb-1234567890.12.azuredatabricks.net
 ```
+
+You are prompted for your Databricks personal access token (input hidden). Pass `-Yes` to
+accept the downloads without prompting, and `-Global` to register the server, agent, and
+command in `~/.config/opencode` so they work in every project, not just this one.
+
+Then check it:
+
+```powershell
+./scripts/Test-DeepResearch.ps1
+```
+
+```
+[PASS] PowerShell 7+            7.6.7
+[PASS] uv on PATH               uv 0.11.32
+[PASS] server environment       C:\src\claude-deep-research\.venv
+[PASS] MCP handshake            server 'research-assistant', tools: deep_research
+[PASS] tool name in opencode    deepresearch_deep_research
+[PASS] Databricks settings      https://adb-...azuredatabricks.net/serving-endpoints
+[PASS] Databricks model call    databricks-claude-opus-4-6 answered over chat/completions
+[PASS] opencode on PATH         1.0.x
+[PASS] opencode mcp list        deepresearch connected
+```
+
+`Test-DeepResearch.ps1` exits non-zero if a check fails, so it works as a smoke test. Use
+`-Quick` to skip the two checks that need network access.
+
+## Use it
+
+```powershell
+# Interactive, on the researcher agent
+./scripts/Start-DeepResearch.ps1
+
+# One-shot: runs the /deep-research command and prints the result
+./scripts/Start-DeepResearch.ps1 -Topic 'room-temperature superconductors since 2023'
+
+# Raw opencode, same thing
+opencode run --command deep-research 'quantum error correction'
+opencode --agent researcher
+```
+
+Inside a session:
+
+```
+/deep-research the history and cultural significance of origami
+```
+
+Or just ask, and the model reaches for the tool itself:
+
+```
+Research the latest developments in quantum computing, then write it up with citations.
+```
+
+### What ships with it
+
+| Piece | Where | What it does |
+|---|---|---|
+| `deepresearch_deep_research` tool | `deep_research.py` | web + academic search, follows the top results, returns extracted content |
+| `researcher` agent | `.opencode/agents/researcher.md` | search-before-answering, cite-only-what-you-saw, write reports to `research/` |
+| `/deep-research` command | `.opencode/commands/deep-research.md` | the five-stage process: explore, synthesize, visualize, follow up, report |
+| `deep_research` MCP prompt | `deep_research.py` | the same process for MCP clients that expose prompts |
+
+### Tool arguments
+
+| Argument | Default | Notes |
+|---|---|---|
+| `query` | required | the research question, phrased as a search query |
+| `sources` | `both` | `web`, `academic`, or `both` |
+| `num_results` | `2` | sources to examine, capped at `DEEP_RESEARCH_MAX_RESULTS` |
+
+In opencode the tool is called `deepresearch_deep_research`: opencode prefixes MCP tools
+with the server name from `opencode.json`.
 
 ## Configuration
 
-The server works out of the box with default settings, but you can modify the following parameters in deep_research.py for customization:
+`opencode.json` in the repository root holds all of it:
 
-```python
-# Configuration
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-MAX_CONTENT_SIZE = 8000  # Maximum characters in the final response
-MAX_RESULTS = 3         # Maximum number of results to process
-```
-
-## Usage
-
-### Running the Server
-
-Modify your Claude desktop config and restart Claude. 
-On a Mac this is at ~/Library/Application Support/Claude
-```
-  "search-scholar": {
-      "command": "<Path to Python>/python",
-      "args": [
-        "<Path to deep research>/deep_research.py"
-      ]
+```json
+{
+  "model": "databricks/databricks-claude-opus-4-6",
+  "provider": {
+    "databricks": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "{env:DATABRICKS_BASE_URL}",
+        "apiKey": "{env:DATABRICKS_TOKEN}"
+      }
     }
+  },
+  "mcp": {
+    "deepresearch": {
+      "type": "local",
+      "command": ["uv", "run", "--quiet", "--project", ".", "deep_research.py"]
+    }
+  }
+}
 ```
 
-### Using with Claude Desktop
+No workspace details or secrets live in the file — it reads two environment variables,
+which the installer sets for your user:
 
-Once installed, you can access the server in Claude Desktop:
+| Variable | Example | Set by |
+|---|---|---|
+| `DATABRICKS_BASE_URL` | `https://adb-123.4.azuredatabricks.net/serving-endpoints` | installer, from `-WorkspaceHost` |
+| `DATABRICKS_TOKEN` | `dapi…` | installer, prompted |
 
-1. **Tool Access**: Use the `deep_research` tool directly in conversation
+`-Scope Process` keeps both in the current shell only, instead of persisting them to your
+user environment. To keep the token out of the environment entirely, put it in a file and
+point the config at it: `"apiKey": "{file:~/.databricks/opencode-token}"`.
 
-### Research Tool
+### Server knobs
 
-The main `deep_research` tool accepts the following parameters:
+Set through the MCP server's `environment` block in `opencode.json`:
 
-- `query` (required): The research question or topic
-- `sources` (optional): Which sources to use: "web", "academic", or "both" (default)
-- `num_results` (optional): Number of sources to examine (default 2, max 3)
+| Variable | Default | Effect |
+|---|---|---|
+| `DEEP_RESEARCH_MAX_CONTENT` | `8000` (`16000` in `opencode.json`) | character budget for a tool response |
+| `DEEP_RESEARCH_MAX_RESULTS` | `3` | hard cap on `num_results` |
+| `DEEP_RESEARCH_USER_AGENT` | a desktop Chrome string | User-Agent for search and page fetches |
 
-Example prompts:
+### Choosing a different model
 
+Change both the `model` field and the key under `provider.databricks.models` to the name of
+a serving endpoint in your workspace — for example `databricks-claude-sonnet-4-5`. Model
+names on the pay-per-token endpoints look like `databricks-claude-*`; through Unity Gateway
+they look like `system.ai.claude-*`. `limit.context` and `limit.output` only tell opencode
+how to track context; raise them if your endpoint allows more.
+
+A cheaper endpoint for title generation and other side work:
+
+```json
+"small_model": "databricks/databricks-claude-sonnet-4-5"
 ```
-Can you research the latest developments in quantum computing?
 
-I need comprehensive information about climate change mitigation strategies. Use the deep_research tool to help me.
+### Databricks surfaces
 
-Research the history and cultural significance of origami using academic sources.
-```
+The default is the OpenAI-compatible surface at `/serving-endpoints`, because its bearer
+authentication is exactly what opencode's `apiKey` option sends.
 
-### Research Prompt
-
-The server includes a structured research prompt that guides Claude through a comprehensive research process:
-
-1. **Initial Exploration**: Gathers information from multiple sources
-2. **Preliminary Synthesis**: Organizes findings with visualization
-3. **Follow-up Research**: Identifies and explores knowledge gaps
-4. **Comprehensive Analysis**: Integrates all information with visual elements
-5. **Proper Citations**: Formats references using APA style
-
+Databricks also serves the native Anthropic Messages API at
+`/serving-endpoints/anthropic/v1` (and `/ai-gateway/anthropic/v1` through Unity Gateway).
+`-Api anthropic` configures that instead: `@ai-sdk/anthropic`, `toolStreaming: false`, and
+an explicit `Authorization: Bearer` header, since the Anthropic provider would otherwise
+send `x-api-key`, which Databricks rejects. That header depends on your opencode build
+expanding `{env:...}` inside header values — run `Test-DeepResearch.ps1` after switching,
+and fall back to the default surface if it reports 401 or 403.
 
 ## Troubleshooting
 
-### Common Issues
+| Symptom | Cause and fix |
+|---|---|
+| `opencode: command not found` after installing | PATH changes land in new shells. Open a fresh PowerShell window. |
+| `401` / `403` on the model call | Token expired, belongs to another workspace, or lacks access to the endpoint. Re-run the installer with a fresh token. |
+| `404` on the model call | Endpoint name or base URL path is wrong. Check the endpoint name in Serving and that the URL ends in `/serving-endpoints`. |
+| Empty or missing credentials, no obvious error | `{env:...}` becomes an empty string when a variable is unset. `Test-DeepResearch.ps1` check 4 catches this. |
+| `deepresearch` missing from `opencode mcp list` | opencode was started outside the repository. Run it from here, or install with `-Global`. |
+| MCP handshake fails | Run `uv run deep_research.py` directly — the server logs to stderr. |
+| Scripts refuse to run | Per-user execution policy, no admin needed: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
+| Searches time out or return little | DuckDuckGo and Semantic Scholar both rate-limit. Narrow the query and retry. |
+| PDF sources return no content | Expected: the server reports the URL and that the text could not be extracted rather than guessing. |
 
-- **Server Connection Failures**: Ensure you're using the correct path to the server file.
-- **Search Errors**: Some searches may time out or return limited results. Try a more specific query.
-- **Web Access Issues**: The server requires internet access to function properly.
-- **Content Formatting**: Very large responses may be truncated to fit within size limits.
+## Using it from another MCP client
 
-### Logs
+`deep_research.py` is a standard stdio MCP server, so any client works. Point it at:
 
-The server outputs logs to stderr that can help diagnose issues:
-
-```bash
-# View logs when running directly
-python deep_research.py 2> server.log
-
-# View logs from Claude Desktop (macOS/Linux)
-tail -f ~/Library/Logs/Claude/mcp-server-deepresearch.log
+```
+uv run --project <path-to-repo> deep_research.py
 ```
 
-## Contributing
+It needs `mcp`, `httpx`, and `beautifulsoup4` (`mcp` 1.x and 2.x are both supported). For a
+plain virtual environment instead of uv:
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe deep_research.py
+```
 
+## Repository layout
+
+```
+deep_research.py                     the MCP server (tool + prompt)
+opencode.json                        model, Databricks provider, MCP server registration
+pyproject.toml / uv.lock             pinned server dependencies
+requirements.txt                     same dependencies for a plain venv
+AGENTS.md                            working notes for agents editing this repo
+.opencode/agents/researcher.md       the research agent
+.opencode/commands/deep-research.md  the /deep-research command
+scripts/Install-DeepResearch.ps1     per-user install and configuration
+scripts/Test-DeepResearch.ps1        diagnostics, exits non-zero on failure
+scripts/Start-DeepResearch.ps1       launcher for the TUI and one-shot runs
+```
+
+## Ported from the Claude Desktop version
+
+This started as an MCP server configured by hand in Claude Desktop's JSON config. What
+changed:
+
+- **Client**: opencode CLI instead of Claude Desktop; the server is registered in
+  `opencode.json` rather than `claude_desktop_config.json`.
+- **Model**: Claude Opus through Databricks Model Serving, configured as a custom opencode
+  provider.
+- **Prompt**: the multi-stage research prompt became an opencode command and agent, and
+  writes markdown reports to `research/` instead of Claude Desktop artifacts.
+- **Install**: PowerShell 7 scripts and uv, all per-user. The server no longer shells out
+  to `pip` on startup — that wrote to whichever Python it found (often needing admin) and
+  printed to stdout, which is where the MCP protocol lives.
+- **SDK**: works with both `mcp` 1.x (`FastMCP`) and 2.x (`MCPServer`).
 
 ## Acknowledgments
 
 - Built on the [Model Context Protocol](https://modelcontextprotocol.io/)
+- Runs in [opencode](https://opencode.ai)
 - Uses [DuckDuckGo](https://duckduckgo.com/) for web search
 - Uses [Semantic Scholar](https://www.semanticscholar.org/) for academic research
-- Inspired by Anthropic's [Claude](https://claude.ai/)
+- Claude models served by [Databricks Model Serving](https://docs.databricks.com/aws/en/machine-learning/foundation-model-apis/)
 
 ---
 
