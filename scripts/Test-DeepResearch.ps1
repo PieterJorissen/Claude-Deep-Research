@@ -4,27 +4,24 @@
     Checks that the deep-research MCP server works and that opencode can see it.
 
 .DESCRIPTION
-    Runs independent checks and prints one line per check. Exits 1 if any check fails, so
-    it can gate a pipeline or a smoke test. Nothing here changes your configuration.
+    A standalone check, deliberately not an opencode command: it has to work when the
+    server will not start, which is exactly when opencode cannot tell you why. Prints one
+    line per check and exits 1 if any fails, so it also works as a smoke test. Nothing
+    here changes your configuration.
 
       1. PowerShell version
-      2. uv and the server environment (.venv)
+      2. uv on PATH
       3. MCP handshake over stdio: initialize, tools/list, prompts/list
       4. opencode on PATH
       5. Models opencode can reach (skipped with -Quick)
-      6. Databricks connection - only when this repo's installer configured one
-      7. Reachability of the two research hosts (skipped with -Quick)
-      8. opencode's view of the configured MCP servers (skipped with -Quick)
+      6. Reachability of the two research hosts (skipped with -Quick)
+      7. opencode's view of the configured MCP servers (skipped with -Quick)
 
-    Model access is not this repository's business: if DATABRICKS_BASE_URL and
-    DATABRICKS_TOKEN are not set, check 6 is skipped and check 5 reports what your own
+    Model access is not this repository's business - check 5 only reports what your own
     opencode configuration provides.
 
 .PARAMETER Quick
-    Skip the checks that need network access (5, 7 and 8).
-
-.PARAMETER Model
-    Serving endpoint to probe in check 6. Defaults to databricks-claude-opus-4-6.
+    Skip the checks that need network access (5, 6 and 7).
 
 .EXAMPLE
     ./scripts/Test-DeepResearch.ps1
@@ -34,8 +31,7 @@
 #>
 [CmdletBinding()]
 param(
-    [switch] $Quick,
-    [string] $Model = 'databricks-claude-opus-4-6'
+    [switch] $Quick
 )
 
 Set-StrictMode -Version 3.0
@@ -121,21 +117,13 @@ else {
     Write-Result fail 'PowerShell 7+' "found $($PSVersionTable.PSVersion); install PowerShell 7 from the Microsoft Store (no admin needed)"
 }
 
-# 2. uv and the server environment ------------------------------------------------------
+# 2. uv ---------------------------------------------------------------------------------
 $uv = Get-Command uv -ErrorAction SilentlyContinue
 if ($uv) {
     Write-Result pass 'uv on PATH' "$((uv --version) -join ' ') at $($uv.Source)"
 }
 else {
-    Write-Result fail 'uv on PATH' 'run ./scripts/Install-DeepResearch.ps1, or open a new shell if it was just installed'
-}
-
-$venv = Join-Path $RepoRoot '.venv'
-if (Test-Path $venv) {
-    Write-Result pass 'server environment' $venv
-}
-else {
-    Write-Result warn 'server environment' "$venv is missing; uv creates it on first run (uv sync)"
+    Write-Result fail 'uv on PATH' 'install it with: irm https://astral.sh/uv/install.ps1 | iex (per-user), then open a new shell'
 }
 
 # 3. MCP handshake ----------------------------------------------------------------------
@@ -172,7 +160,7 @@ if ($opencode) {
     Write-Result pass 'opencode on PATH' "$((opencode --version) -join ' ') at $($opencode.Source)"
 }
 else {
-    Write-Result fail 'opencode on PATH' 'run ./scripts/Install-DeepResearch.ps1, or open a new shell if it was just installed'
+    Write-Result fail 'opencode on PATH' 'install opencode (https://opencode.ai/docs/), or open a new shell if it was just installed'
 }
 
 # 5. Model access -----------------------------------------------------------------------
@@ -188,7 +176,7 @@ else {
     $models = @()
     try { $models = @(opencode models 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' }) } catch { }
     if (-not $models) {
-        Write-Result fail 'model access' "'opencode models' listed nothing - configure a provider in opencode, or run the installer with -ConfigureProvider -WorkspaceHost <host>"
+        Write-Result fail 'model access' "'opencode models' listed nothing - configure a provider in your opencode config"
     }
     else {
         $claude = @($models | Where-Object { $_ -match '(?i)claude|opus|sonnet' })
@@ -201,52 +189,7 @@ else {
     }
 }
 
-# 6. Databricks connection (only when this repo configured one) -------------------------
-$baseUrl = $env:DATABRICKS_BASE_URL
-$token = $env:DATABRICKS_TOKEN
-if (-not $baseUrl -and -not $token) {
-    Write-Result skip 'Databricks connection' 'DATABRICKS_* not set - model access comes from your own opencode configuration (check 5)'
-}
-elseif (-not ($baseUrl -and $token)) {
-    $missing = if ($baseUrl) { 'DATABRICKS_TOKEN' } else { 'DATABRICKS_BASE_URL' }
-    Write-Result fail 'Databricks connection' "$missing is not set in this shell, but the other one is - an empty {env:...} substitution reads as an auth failure"
-}
-elseif ($Quick) {
-    Write-Result skip 'Databricks connection' '-Quick'
-}
-else {
-    $isAnthropic = $baseUrl -match '/anthropic(/v1)?/?$'
-    $url = if ($isAnthropic) { "$($baseUrl.TrimEnd('/'))/messages" } else { "$($baseUrl.TrimEnd('/'))/chat/completions" }
-    $body = @{ model = $Model; max_tokens = 1; messages = @(@{ role = 'user'; content = 'ping' }) }
-    try {
-        $response = Invoke-WebRequest -Uri $url -Method Post -TimeoutSec 90 -SkipHttpErrorCheck `
-            -Headers @{ Authorization = "Bearer $token" } `
-            -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 5)
-        switch ([int] $response.StatusCode) {
-            200 {
-                # A 200 from the wrong host would otherwise read as success, so check the shape.
-                $payload = try { $response.Content | ConvertFrom-Json } catch { $null }
-                $fields = if ($payload) { $payload.PSObject.Properties.Name } else { @() }
-                $expected = if ($isAnthropic) { 'content' } else { 'choices' }
-                if ($fields -contains $expected) {
-                    Write-Result pass 'Databricks connection' "$Model answered over $(if ($isAnthropic) { 'the Messages API' } else { 'chat/completions' })"
-                }
-                else {
-                    Write-Result warn 'Databricks connection' "$url returned 200 but no '$expected' field - is DATABRICKS_BASE_URL pointing at the serving endpoint?"
-                }
-            }
-            401 { Write-Result fail 'Databricks connection' "401 from $url - the token is wrong, expired, or belongs to another workspace" }
-            403 { Write-Result fail 'Databricks connection' "403 from $url - the token lacks access to this serving endpoint" }
-            404 { Write-Result fail 'Databricks connection' "404 from $url - check the endpoint name '$Model' and the base URL path" }
-            default { Write-Result fail 'Databricks connection' "HTTP $($response.StatusCode) from $url : $($response.Content -replace '\s+', ' ')" }
-        }
-    }
-    catch {
-        Write-Result fail 'Databricks connection' "$url - $($_.Exception.Message)"
-    }
-}
-
-# 7. Research hosts ---------------------------------------------------------------------
+# 6. Research hosts ---------------------------------------------------------------------
 # The server talks HTTPS to these two hosts directly - no browser, no search CLI. On a
 # corporate network they are the usual thing to be blocked or TLS-inspected.
 $researchHosts = [ordered] @{
@@ -279,7 +222,7 @@ foreach ($entry in $researchHosts.GetEnumerator()) {
     }
 }
 
-# 8. opencode's view of the MCP servers -------------------------------------------------
+# 7. opencode's view of the MCP servers -------------------------------------------------
 if (-not $opencode) {
     Write-Result skip 'opencode mcp list' 'needs opencode'
 }
@@ -294,7 +237,7 @@ else {
             Write-Result pass 'opencode mcp list' ($output.Trim() -replace '\s+', ' ')
         }
         else {
-            Write-Result warn 'opencode mcp list' "deepresearch not listed. Run opencode from $RepoRoot, or install globally with -Global. Output: $($output.Trim() -replace '\s+', ' ')"
+            Write-Result warn 'opencode mcp list' "deepresearch not listed. Run opencode from $RepoRoot, or register it globally with /research-setup. Output: $($output.Trim() -replace '\s+', ' ')"
         }
     }
     else {
